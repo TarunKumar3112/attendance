@@ -18,16 +18,17 @@ function saveJSON(key, value) {
 }
 
 /**
- * User management is now handled by Google Sheets
+ * User management is now handled by Google Sheets via backend
  */
 export function getUsers() {
-  console.warn("getUsers() is deprecated. Use Google Sheets instead.");
+  console.warn("getUsers() should use googleSheets.js - calling getAllUsers()");
   return [];
 }
 export function setUsers(users) {
-  console.warn("setUsers() is deprecated. Use Google Sheets instead.");
+  console.warn("setUsers() should use googleSheets.js - calling addUser()");
 }
 
+// Local attendance storage (for offline capability)
 export function getAttendance() {
   return loadJSON(DB_KEYS.ATT, []);
 }
@@ -35,6 +36,7 @@ export function setAttendance(rows) {
   saveJSON(DB_KEYS.ATT, rows);
 }
 
+// Session management
 export function getSession() {
   return loadJSON(DB_KEYS.SESS, { type: null, userId: null });
 }

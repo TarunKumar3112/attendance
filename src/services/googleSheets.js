@@ -1,56 +1,37 @@
 import axios from "axios";
 
 /**
- * Google Sheets API Integration
- * Uses Google Apps Script to read/write user data
- * Falls back to localStorage if Google Sheets is unavailable
+ * Google Sheets API Integration (via Backend Proxy)
+ * All data syncs to Google Sheets - no localStorage fallback
  */
 
-// Get from environment variables
-const GOOGLE_SHEETS_API_URL = import.meta.env.VITE_GOOGLE_SHEETS_API_URL;
-const USE_LOCAL_STORAGE = !GOOGLE_SHEETS_API_URL;
+// Backend proxy URL for all requests
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
+const SHEETS_PROXY_URL = `${BACKEND_URL}/api/sheets`;
 
-// Local storage key for users
-const LOCAL_USERS_KEY = "tronxlabs_users_local";
-
-if (!GOOGLE_SHEETS_API_URL) {
-  console.warn(
-    "⚠️ VITE_GOOGLE_SHEETS_API_URL not configured. Using localStorage for demo."
-  );
-}
+console.log("📊 Google Sheets Backend URL:", SHEETS_PROXY_URL);
 
 /**
- * Get all users (from Google Sheets or localStorage)
+ * Get all users from Google Sheets
  */
 export async function getAllUsers() {
   try {
-    if (USE_LOCAL_STORAGE) {
-      return getLocalUsers();
-    }
-    
-    const response = await axios.post(GOOGLE_SHEETS_API_URL, {
+    const response = await axios.post(SHEETS_PROXY_URL, {
       action: "getUsers",
     });
     return response.data.users || [];
   } catch (error) {
-    console.warn(
-      "Google Sheets unavailable, falling back to localStorage:",
-      error.message
-    );
-    return getLocalUsers();
+    console.error("Error fetching users from Google Sheets:", error.message);
+    throw new Error("Failed to fetch users. Make sure backend is running.");
   }
 }
 
 /**
- * Add new user (to Google Sheets or localStorage)
+ * Add new user to Google Sheets
  */
 export async function addUser(user) {
   try {
-    if (USE_LOCAL_STORAGE) {
-      return addLocalUser(user);
-    }
-    
-    const response = await axios.post(GOOGLE_SHEETS_API_URL, {
+    const response = await axios.post(SHEETS_PROXY_URL, {
       action: "addUser",
       user: {
         email: user.email,
@@ -63,8 +44,8 @@ export async function addUser(user) {
     });
     return response.data.success;
   } catch (error) {
-    console.warn("Google Sheets unavailable, saving to localStorage");
-    return addLocalUser(user);
+    console.error("Error adding user to Google Sheets:", error.message);
+    throw new Error(error.response?.data?.error || "Failed to create user");
   }
 }
 
@@ -76,7 +57,7 @@ export async function userExists(email) {
     const users = await getAllUsers();
     return users.some((u) => u.email?.toLowerCase() === email.toLowerCase());
   } catch (error) {
-    console.error("Error checking if user exists:", error);
+    console.error("Error checking user existence:", error);
     throw error;
   }
 }
@@ -105,119 +86,41 @@ export async function getUserByEmail(email) {
     const users = await getAllUsers();
     return users.find((u) => u.email?.toLowerCase() === email.toLowerCase());
   } catch (error) {
-    console.error("Error finding user:", error);
+    console.error("Error finding user by email:", error);
     throw error;
-  }
-}
-
-// ============ LOCAL STORAGE FUNCTIONS ============
-
-function getLocalUsers() {
-  try {
-    const raw = localStorage.getItem(LOCAL_USERS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function addLocalUser(user) {
-  try {
-    const users = getLocalUsers();
-    
-    // Check if email exists
-    if (users.some((u) => u.email?.toLowerCase() === user.email.toLowerCase())) {
-      throw new Error("Email already exists");
-    }
-
-    users.push({
-      email: user.email,
-      password: user.pass,
-      name: user.name,
-      phone: user.phone,
-      role: user.role,
-      createdAt: new Date().toISOString(),
-    });
-
-    localStorage.setItem(LOCAL_USERS_KEY, JSON.stringify(users));
-    return true;
-  } catch (error) {
-    throw new Error(error.message || "Failed to create user");
   }
 }
 
 // ============ ATTENDANCE TRACKING ============
 
-const LOCAL_ATTENDANCE_KEY = "tronxlabs_attendance_local";
-
 /**
- * Record attendance (check-in or check-out)
+ * Record attendance (check-in or check-out) to Google Sheets
  */
 export async function recordAttendance(attendanceRecord) {
   try {
-    if (USE_LOCAL_STORAGE) {
-      return recordLocalAttendance(attendanceRecord);
-    }
-
-    const response = await axios.post(GOOGLE_SHEETS_API_URL, {
+    const response = await axios.post(SHEETS_PROXY_URL, {
       action: "addAttendance",
       attendance: attendanceRecord,
     });
     return response.data.success;
   } catch (error) {
-    console.warn("Google Sheets unavailable, saving to localStorage");
-    return recordLocalAttendance(attendanceRecord);
+    console.error("Error recording attendance:", error.message);
+    throw new Error("Failed to record attendance");
   }
 }
 
 /**
- * Get all attendance records for a user
+ * Get all attendance records for a user from Google Sheets
  */
 export async function getUserAttendanceRecords(userName) {
   try {
-    if (USE_LOCAL_STORAGE) {
-      return getLocalAttendanceRecords(userName);
-    }
-
-    const response = await axios.post(GOOGLE_SHEETS_API_URL, {
+    const response = await axios.post(SHEETS_PROXY_URL, {
       action: "getUserAttendance",
       userName,
     });
     return response.data.records || [];
   } catch (error) {
-    console.warn("Google Sheets unavailable, reading from localStorage");
-    return getLocalAttendanceRecords(userName);
-  }
-}
-
-function recordLocalAttendance(record) {
-  try {
-    const records = getLocalAttendanceRecords(record.userName);
-    
-    records.push({
-      id: "att_" + Math.random().toString(16).slice(2) + Date.now().toString(16),
-      ...record,
-    });
-
-    const allRecords = JSON.parse(localStorage.getItem(LOCAL_ATTENDANCE_KEY) || "[]");
-    allRecords.push({
-      id: "att_" + Math.random().toString(16).slice(2) + Date.now().toString(16),
-      ...record,
-    });
-    
-    localStorage.setItem(LOCAL_ATTENDANCE_KEY, JSON.stringify(allRecords));
-    return true;
-  } catch (error) {
-    throw new Error(error.message || "Failed to record attendance");
-  }
-}
-
-function getLocalAttendanceRecords(userName) {
-  try {
-    const raw = localStorage.getItem(LOCAL_ATTENDANCE_KEY);
-    const allRecords = raw ? JSON.parse(raw) : [];
-    return allRecords.filter((r) => r.userName?.toLowerCase() === userName?.toLowerCase());
-  } catch {
-    return [];
+    console.error("Error fetching attendance records:", error.message);
+    throw new Error("Failed to fetch attendance records");
   }
 }
