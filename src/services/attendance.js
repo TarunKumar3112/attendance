@@ -1,6 +1,6 @@
 import { getAttendance, setAttendance } from "./storage";
 import { getCurrentPosition, reverseGeocode, deviceInfo } from "./geo";
-import { recordAttendance, getUserAttendanceRecords } from "./googleSheets";
+import { recordAttendance } from "./supabase";
 
 export function latestStatusFor(userId) {
   const rows = getAttendance()
@@ -42,7 +42,7 @@ export async function createAttendance({ userId, type, userName }) {
   rows.push(record);
   setAttendance(rows);
 
-  // Also save to Google Sheets (if available)
+  // Also save to Supabase (if available)
   try {
     await recordAttendance({
       id: record.id,
@@ -55,7 +55,7 @@ export async function createAttendance({ userId, type, userName }) {
       device: JSON.stringify(record.device),
     });
   } catch (error) {
-    console.warn("Could not save to Google Sheets:", error);
+    console.warn("Could not save to Supabase:", error);
     // Still saved to localStorage, so continue
   }
 }
