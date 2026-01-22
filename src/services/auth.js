@@ -1,15 +1,14 @@
-import { getUsers, setUsers, setSession } from "./storage";
+import { setSession } from "./storage";
 import {
   userExists,
   addUser,
   getUserByEmailAndPassword,
-  getUserByEmail,
-} from "./googleSheets";
+} from "./supabaseService";
 
 /**
- * Google Sheets Authentication
- * - User data stored in Google Sheet
- * - Passwords stored as plain text in sheet (use strong passwords)
+ * Supabase Authentication
+ * - User data stored in Supabase
+ * - Passwords stored as plain text (use strong passwords)
  * - Sessions managed via localStorage
  */
 
@@ -23,7 +22,7 @@ export async function signupEmployee({ name, phone, email, pass }) {
     const exists = await userExists(e);
     if (exists) throw new Error("Email already exists.");
 
-    // Add user to Google Sheet
+    // Add user to Supabase
     const user = {
       id: "u_" + Math.random().toString(16).slice(2) + Date.now().toString(16),
       name: name.trim(),
@@ -71,7 +70,7 @@ export function logoutEmployee() {
 
 /**
  * Admin Login
- * Admins are stored in Google Sheet with role="admin"
+ * Admins are stored in Supabase with role="admin"
  */
 export async function loginAdmin({ email, pass }) {
   const e = email.trim().toLowerCase();
