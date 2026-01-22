@@ -18,14 +18,14 @@ function saveJSON(key, value) {
 }
 
 /**
- * User management is now handled by Google Sheets via backend
+ * User management is handled by Supabase via supabaseService.js
  */
 export function getUsers() {
-  console.warn("getUsers() should use googleSheets.js - calling getAllUsers()");
+  console.warn("getUsers() is deprecated. Use supabaseService.getAllUsers().");
   return [];
 }
-export function setUsers(users) {
-  console.warn("setUsers() should use googleSheets.js - calling addUser()");
+export function setUsers() {
+  console.warn("setUsers() is deprecated. Use supabaseService.addUser().");
 }
 
 // Local attendance storage (for offline capability)
