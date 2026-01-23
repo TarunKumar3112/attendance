@@ -13,7 +13,16 @@ function fmt(iso) {
 export default function EmployeeDashboard() {
   const nav = useNavigate();
   const session = getSession();
-  const me = useMemo(() => getUsers().find((u) => u.id === session.userId), [session.userId]);
+  
+  // Get user info from session (userId is the email)
+  const me = useMemo(() => {
+    if (!session.userId) return null;
+    return {
+      id: session.userId,
+      email: session.userId,
+      name: session.userName || "Employee"
+    };
+  }, [session.userId, session.userName]);
 
   const [toast, setToast] = useState("");
   const [logs, setLogs] = useState([]);
@@ -32,11 +41,15 @@ export default function EmployeeDashboard() {
     if (!me) return;
     setBusy(true);
     try {
+      console.log("🔄 Starting", type, "for user:", me.name);
       await createAttendance({ userId: me.id, type, userName: me.name });
+      console.log("✅", type, "successful");
       setToast(type === "checkin" ? "Checked in." : "Checked out.");
       refresh();
-    } catch {
-      setToast("Location permission needed (use HTTPS or localhost).");
+    } catch (error) {
+      console.error("❌ Error during", type, ":", error.message);
+      console.error("Full error:", error);
+      setToast("❌ " + (error.message || "Location permission needed (use HTTPS or localhost)."));
     } finally {
       setBusy(false);
       setTimeout(() => setToast(""), 2200);

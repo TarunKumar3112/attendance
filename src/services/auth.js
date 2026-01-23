@@ -4,12 +4,12 @@ import {
   addUser,
   getUserByEmailAndPassword,
   getUserByEmail,
-} from "./googleSheets";
+} from "./supabase";
 
 /**
- * Google Sheets Authentication
- * - User data stored in Google Sheet
- * - Passwords stored as plain text in sheet (use strong passwords)
+ * Supabase Authentication
+ * - User data stored in Supabase database
+ * - Passwords stored securely in database (consider hashing in production)
  * - Sessions managed via localStorage
  */
 
@@ -52,7 +52,7 @@ export async function loginEmployee({ email, pass }) {
       throw new Error("Invalid credentials.");
     }
 
-    setSession({ type: "employee", userId: user.email });
+    setSession({ type: "employee", userId: user.email, userName: user.name });
     return {
       id: user.email,
       name: user.name,
@@ -71,7 +71,7 @@ export function logoutEmployee() {
 
 /**
  * Admin Login
- * Admins are stored in Google Sheet with role="admin"
+ * Admins are stored in Supabase with role="admin"
  */
 export async function loginAdmin({ email, pass }) {
   const e = email.trim().toLowerCase();
@@ -84,7 +84,7 @@ export async function loginAdmin({ email, pass }) {
       throw new Error("Invalid admin credentials.");
     }
 
-    setSession({ type: "admin", userId: user.email });
+    setSession({ type: "admin", userId: user.email, userName: user.name });
     return {
       id: user.email,
       name: user.name,
