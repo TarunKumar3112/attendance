@@ -1,6 +1,9 @@
 import { getAttendance, setAttendance } from "./storage";
 import { getCurrentPosition, reverseGeocode, deviceInfo } from "./geo";
+HEAD
 import { recordAttendance, getUserAttendanceRecords } from "./supabase";
+import { recordAttendance, getUserAttendanceRecords } from "./supabaseService";
+
 
 export function latestStatusFor(userId) {
   const rows = getAttendance()
@@ -28,7 +31,7 @@ export async function createAttendance({ userId, type, userName }) {
   const record = {
     id: "a_" + Math.random().toString(16).slice(2) + Date.now().toString(16),
     userId,
-    userName,
+    userName: userName || "Unknown",
     type, // checkin / checkout
     time: new Date().toISOString(),
     lat,
@@ -42,6 +45,7 @@ export async function createAttendance({ userId, type, userName }) {
   rows.push(record);
   setAttendance(rows);
 
+HEAD
   // Also save to Supabase
   try {
     console.log("🔄 Saving attendance record...");
@@ -58,6 +62,13 @@ export async function createAttendance({ userId, type, userName }) {
     console.log("✅ Attendance saved successfully!");
   } catch (error) {
     console.error("⚠️ Could not save to Supabase:", error.message);
+
+  // Also save to Supabase (if available)
+  try {
+    await recordAttendance(record);
+  } catch (error) {
+    console.warn("Could not save to Supabase:", error);
+     ffb0b7b4cc6c911043c82834eb9b839584eb5071
     // Still saved to localStorage, so continue
   }
-}
+  }}

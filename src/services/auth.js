@@ -1,4 +1,4 @@
-import { getUsers, setUsers, setSession } from "./storage";
+import { setSession } from "./storage";
 import {
   userExists,
   addUser,
@@ -10,6 +10,14 @@ import {
  * Supabase Authentication
  * - User data stored in Supabase database
  * - Passwords stored securely in database (consider hashing in production)
+
+} from "./supabaseService";
+
+/**
+ * Supabase Authentication
+ * - User data stored in Supabase
+ * - Passwords stored as plain text (use strong passwords)
+1
  * - Sessions managed via localStorage
  */
 
@@ -23,7 +31,7 @@ export async function signupEmployee({ name, phone, email, pass }) {
     const exists = await userExists(e);
     if (exists) throw new Error("Email already exists.");
 
-    // Add user to Google Sheet
+    // Add user to Supabase
     const user = {
       id: "u_" + Math.random().toString(16).slice(2) + Date.now().toString(16),
       name: name.trim(),
