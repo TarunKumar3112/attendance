@@ -3,7 +3,8 @@ import { useNavigate } from "react-router-dom";
 import Card from "../../ui/Card";
 import Toast from "../../ui/Toast";
 import { getSession, getUsers } from "../../services/storage";
-import { createAttendance, getUserLogs, latestStatusFor } from "../../services/attendance";
+import { createAttendance } from "../../services/attendance";
+import { getUserAttendanceRecords } from "../../services/supabase";
 import { logoutEmployee } from "../../services/auth";
 
 function fmt(iso) {
@@ -13,17 +14,40 @@ function fmt(iso) {
 export default function EmployeeDashboard() {
   const nav = useNavigate();
   const session = getSession();
-  const me = useMemo(() => getUsers().find((u) => u.id === session.userId), [session.userId]);
+
+  // Get user info from session (userId is the email)
+  const me = useMemo(() => {
+    if (!session.userId) return null;
+    return {
+      id: session.userId,
+      email: session.userId,
+      name: session.userName || "Employee"
+    };
+  }, [session.userId, session.userName]);
 
   const [toast, setToast] = useState("");
   const [logs, setLogs] = useState([]);
   const [status, setStatus] = useState({ status: "Not working", latest: null });
   const [busy, setBusy] = useState(false);
 
-  const refresh = () => {
+  const refresh = async () => {
     if (!me) return;
-    setLogs(getUserLogs(me.id).slice(0, 10));
-    setStatus(latestStatusFor(me.id));
+    try {
+      const records = await getUserAttendanceRecords(me.name);
+      setLogs(records.slice(0, 10));
+
+      const latest = records[0];
+      if (!latest) {
+        setStatus({ status: "Not working", latest: null });
+      } else {
+        setStatus({
+          status: latest.type === "checkin" ? "Working" : "Not working",
+          latest
+        });
+      }
+    } catch (error) {
+      console.error("Failed to fetch logs:", error);
+    }
   };
 
   useEffect(() => { refresh(); }, [me?.id]);
@@ -32,11 +56,15 @@ export default function EmployeeDashboard() {
     if (!me) return;
     setBusy(true);
     try {
+      console.log("🔄 Starting", type, "for user:", me.name);
       await createAttendance({ userId: me.id, type, userName: me.name });
+      console.log("✅", type, "successful");
       setToast(type === "checkin" ? "Checked in." : "Checked out.");
       refresh();
-    } catch {
-      setToast("Location permission needed (use HTTPS or localhost).");
+    } catch (error) {
+      console.error("❌ Error during", type, ":", error.message);
+      console.error("Full error:", error);
+      setToast("❌ " + (error.message || "Location permission needed (use HTTPS or localhost)."));
     } finally {
       setBusy(false);
       setTimeout(() => setToast(""), 2200);

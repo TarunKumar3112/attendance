@@ -1,8 +1,7 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import Card from "../../ui/Card";
-import { getUsers } from "../../services/storage";
-import { getUserLogs, latestStatusFor } from "../../services/attendance";
+import { getAllUsers, getAllAttendanceRecords } from "../../services/supabase";
 import { logoutAdmin } from "../../services/auth";
 
 function fmt(iso) {
@@ -12,21 +11,58 @@ function fmt(iso) {
 export default function AdminDashboard() {
   const nav = useNavigate();
   const [selectedId, setSelectedId] = useState(null);
+  const [employees, setEmployees] = useState([]);
+  const [allRecords, setAllRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
 
-  const employees = useMemo(() => {
-    return getUsers()
-      .filter((u) => u.role === "employee")
-      .sort((a, b) => a.name.localeCompare(b.name));
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        const [users, records] = await Promise.all([
+          getAllUsers(),
+          getAllAttendanceRecords()
+        ]);
+        
+        console.log("📦 Fetched users:", users);
+        console.log("📊 Fetched records:", records);
+
+        const employeesList = users
+          .filter((u) => u.role === "employee")
+          .sort((a, b) => a.name.localeCompare(b.name));
+        
+        setEmployees(employeesList);
+        setAllRecords(records);
+      } catch (error) {
+        console.error("Failed to fetch data:", error);
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchData();
   }, []);
 
+  const getLatestStatus = (user) => {
+    const userRecords = allRecords
+      .filter((r) => r.userName === user.name)
+      .sort((a, b) => new Date(b.time) - new Date(a.time));
+    
+    const latest = userRecords[0];
+    if (!latest) return { status: "Not working", latest: null };
+    return { status: latest.type === "checkin" ? "Working" : "Not working", latest };
+  };
+
+  const getUserLogs = (userName) => {
+    return allRecords
+      .filter((r) => r.userName === userName)
+      .sort((a, b) => new Date(b.time) - new Date(a.time));
+  };
+
   const workingCount = useMemo(() => {
-    let w = 0;
-    for (const u of employees) if (latestStatusFor(u.id).status === "Working") w++;
-    return w;
-  }, [employees]);
+    return employees.filter(u => getLatestStatus(u).status === "Working").length;
+  }, [employees, allRecords]);
 
   const selected = employees.find((e) => e.id === selectedId) || null;
-  const selectedLogs = selected ? getUserLogs(selected.id) : [];
+  const selectedLogs = selected ? getUserLogs(selected.name) : [];
 
   const toggleSelect = (id) => {
     setSelectedId((prev) => (prev === id ? null : id)); // click again -> minimize
@@ -56,10 +92,12 @@ export default function AdminDashboard() {
               <h3 className="title" style={{ fontSize: 15, margin: "0 0 10px 0" }}>Employees</h3>
 
               <div className="list">
-                {employees.length === 0 ? (
+                {loading ? (
+                  <div className="muted small">Loading employees...</div>
+                ) : employees.length === 0 ? (
                   <div className="muted small">No employees yet.</div>
                 ) : employees.map((u) => {
-                  const st = latestStatusFor(u.id);
+                  const st = getLatestStatus(u);
                   const latestTime = st.latest ? fmt(st.latest.time) : "—";
                   const dotColor = st.status === "Working" ? "var(--ok)" : "#cbd5e1";
 
@@ -95,7 +133,7 @@ export default function AdminDashboard() {
               ) : (
                 <>
                   {(() => {
-                    const st = latestStatusFor(selected.id);
+                    const st = getLatestStatus(selected);
                     const latest = st.latest;
                     return (
                       <div className="item" style={{ cursor: "default" }}>

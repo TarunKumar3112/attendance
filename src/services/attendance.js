@@ -1,22 +1,26 @@
 import { getAttendance, setAttendance } from "./storage";
 import { getCurrentPosition, reverseGeocode, deviceInfo } from "./geo";
-import { recordAttendance, getUserAttendanceRecords } from "./googleSheets";
+import { recordAttendance, getUserAttendanceRecords } from "./supabase";
 
-export function latestStatusFor(userId) {
-  const rows = getAttendance()
-    .filter((r) => r.userId === userId)
-    .sort((a, b) => new Date(b.time) - new Date(a.time));
-
-  const latest = rows[0];
-  if (!latest) return { status: "Not working", latest: null };
-
-  return { status: latest.type === "checkin" ? "Working" : "Not working", latest };
+export async function latestStatusFor(userName) {
+  try {
+    const rows = await getUserAttendanceRecords(userName);
+    const latest = rows[0];
+    if (!latest) return { status: "Not working", latest: null };
+    return { status: latest.type === "checkin" ? "Working" : "Not working", latest };
+  } catch (error) {
+    console.error("Error in latestStatusFor:", error);
+    return { status: "Not working", latest: null };
+  }
 }
 
-export function getUserLogs(userId) {
-  return getAttendance()
-    .filter((r) => r.userId === userId)
-    .sort((a, b) => new Date(b.time) - new Date(a.time));
+export async function getUserLogs(userName) {
+  try {
+    return await getUserAttendanceRecords(userName);
+  } catch (error) {
+    console.error("Error in getUserLogs:", error);
+    return [];
+  }
 }
 
 export async function createAttendance({ userId, type, userName }) {
@@ -42,20 +46,22 @@ export async function createAttendance({ userId, type, userName }) {
   rows.push(record);
   setAttendance(rows);
 
-  // Also save to Google Sheets (if available)
+  // Also save to Supabase
   try {
+    console.log("🔄 Saving attendance record...");
     await recordAttendance({
       id: record.id,
       userName: userName || "Unknown",
       type: record.type,
       time: record.time,
-      address: record.address,
+      address: record.address || "Location unavailable",
       lat: record.lat,
       lng: record.lng,
       device: JSON.stringify(record.device),
     });
+    console.log("✅ Attendance saved successfully!");
   } catch (error) {
-    console.warn("Could not save to Google Sheets:", error);
+    console.error("⚠️ Could not save to Supabase:", error.message);
     // Still saved to localStorage, so continue
   }
 }
