@@ -1,0 +1,592 @@
+import React, { useMemo, useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import toast from "react-hot-toast";
+import Card from "../../ui/Card";
+import { supabase, getAllUsers, getAllAttendanceRecords, updateUserRole, assignEmployeeToLeader } from "../../services/supabase";
+import { logout } from "../../services/auth";
+import { useLanguage } from "../../context/LanguageContext";
+import LocationMap from "../../ui/LocationMap";
+
+import { formatBangkokTime, parseISO, getBangkokYMD, getBangkokTimeParts } from "../../utils/date";
+
+import AttendanceCalendar from "../../ui/AttendanceCalendar";
+import PayrollPanel from "../../ui/PayrollPanel";
+import Sidebar from "../../ui/Sidebar";
+import * as XLSX from "xlsx";
+
+export default function AdminDashboard() {
+  const nav = useNavigate();
+  const [selectedId, setSelectedId] = useState(null);
+  const [employees, setEmployees] = useState([]);
+  const [allRecords, setAllRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [now, setNow] = useState(new Date());
+  const { t } = useLanguage();
+
+  // Work hours settings: store as an object { "default": { start, end }, "Employee Name": { start, end } }
+  const [workSettings, setWorkSettings] = useState(() => {
+    try {
+      const saved = localStorage.getItem("work_settings_v2");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error("Failed to parse work settings:", e);
+    }
+    // Fallback to old keys if available, otherwise default
+    return {
+      default: {
+        start: localStorage.getItem("work_start") || "10:00",
+        end: localStorage.getItem("work_end") || "18:00"
+      }
+    };
+  });
+
+  const [settingsTarget, setSettingsTarget] = useState("default");
+  const [tempStart, setTempStart] = useState("");
+  const [tempEnd, setTempEnd] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [activeTab, setActiveTab] = useState("overview");
+
+  // Sync temp inputs when selection changes
+  useEffect(() => {
+    const config = workSettings[settingsTarget] || workSettings["default"];
+    setTempStart(config.start);
+    setTempEnd(config.end);
+  }, [settingsTarget, workSettings]);
+
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        const [users, records] = await Promise.all([
+          getAllUsers(),
+          getAllAttendanceRecords()
+        ]);
+
+        const employeesList = users
+          .filter((u) => u.role === "employee" || u.role === "team_leader")
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        // Extract virtual workers from attendance records
+        const workerNames = [...new Set(records
+          .filter(r => r.userName && r.userName.startsWith("Worker "))
+          .map(r => r.userName))];
+
+        const virtualWorkers = workerNames.map(name => ({
+          id: "worker_" + name.replace(/\s+/g, '_'),
+          name: name,
+          email: "Worker",
+          role: "worker",
+          isVirtual: true
+        })).sort((a, b) => a.name.localeCompare(b.name));
+
+        setEmployees([...employeesList, ...virtualWorkers]);
+        setAllRecords(records);
+      } catch (error) {
+        console.error("Failed to fetch data:", error);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchData();
+
+    // Set up Realtime Subscriptions
+    const adsChannel = supabase.channel('admin_dashboard_realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, () => {
+        console.log("🔄 Realtime: Attendance change detected, refreshing...");
+        fetchData();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, () => {
+        console.log("🔄 Realtime: Users change detected, refreshing...");
+        fetchData();
+      })
+      .subscribe();
+
+    // Timer to refresh "current session" every second
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => {
+      clearInterval(interval);
+      supabase.removeChannel(adsChannel);
+    };
+  }, []);
+
+  const getLatestStatus = (user) => {
+    const userRecords = allRecords
+      .filter((r) => r.userName === user.name)
+      .sort((a, b) => parseISO(b.time) - parseISO(a.time));
+
+    const latest = userRecords[0];
+    if (!latest) return { status: t('statusNotWorking'), latest: null };
+    return { status: latest.type === "checkin" ? t('statusWorking') : t('statusNotWorking'), latest };
+  };
+
+  const calculateTodayStats = (userName) => {
+    const todayYMD = getBangkokYMD(new Date());
+
+    const todayRecords = allRecords
+      .filter((r) => {
+        if (r.userName !== userName) return false;
+        const d = parseISO(r.time);
+        return getBangkokYMD(d) === todayYMD;
+      })
+      .sort((a, b) => parseISO(a.time) - parseISO(b.time));
+
+    let totalMs = 0;
+    let activeStartTime = null;
+    let isLateLogin = false;
+    let isEarlyLogout = false;
+    let firstCheckin = null;
+    let lastCheckout = null;
+
+    const config = workSettings[userName] || workSettings["default"];
+    const { start: limitStart, end: limitEnd } = config;
+
+    todayRecords.forEach((r) => {
+      if (r.type === "checkin") {
+        const time = parseISO(r.time);
+        if (!firstCheckin) {
+          firstCheckin = time;
+          const { hours, minutes } = getBangkokTimeParts(time);
+          const [limitH, limitM] = limitStart.split(":").map(Number);
+          if (hours > limitH || (hours === limitH && minutes > limitM)) {
+            isLateLogin = true;
+          }
+        }
+        activeStartTime = time;
+      } else if (r.type === "checkout" && activeStartTime) {
+        const time = parseISO(r.time);
+        lastCheckout = time;
+        totalMs += time - activeStartTime;
+        activeStartTime = null;
+      }
+    });
+
+    if (activeStartTime) {
+      totalMs += now - activeStartTime;
+    } else if (lastCheckout) {
+      const { hours, minutes } = getBangkokTimeParts(lastCheckout);
+      const [limitH, limitM] = limitEnd.split(":").map(Number);
+      if (hours < limitH || (hours === limitH && minutes < limitM)) {
+        isEarlyLogout = true;
+      }
+    }
+
+    const hours = Math.floor(totalMs / 3600000);
+    const minutes = Math.floor((totalMs % 3600000) / 60000);
+    const seconds = Math.floor((totalMs % 60000) / 1000);
+
+    return {
+      totalTime: `${hours}h ${minutes}m ${seconds}s`,
+      isActive: !!activeStartTime,
+      ms: totalMs,
+      isLateLogin,
+      isEarlyLogout,
+      limitStart,
+      limitEnd
+    };
+  };
+
+  const getUserLogs = (userName) => {
+    return allRecords
+      .filter((r) => r.userName === userName)
+      .sort((a, b) => new Date(b.time) - new Date(a.time));
+  };
+
+  const workingCount = useMemo(() => {
+    return employees.filter(u => getLatestStatus(u).status === "Working").length;
+  }, [employees, allRecords]);
+
+  const selected = employees.find((e) => e.id === selectedId) || null;
+  const selectedLogs = selected ? getUserLogs(selected.name) : [];
+
+  const toggleSelect = (id) => {
+    setSelectedId((prev) => (prev === id ? null : id)); // click again -> minimize
+  };
+
+  const onLogout = () => {
+    logout();
+    nav("/login");
+  };
+
+  const saveWorkSettings = () => {
+    const updated = {
+      ...workSettings,
+      [settingsTarget]: { start: tempStart, end: tempEnd }
+    };
+    setWorkSettings(updated);
+    localStorage.setItem("work_settings_v2", JSON.stringify(updated));
+    toast.success(t('settingsSaved'));
+    setShowSettings(false);
+  };
+
+  const updateRole = async (email, newRole) => {
+    try {
+      await updateUserRole(email, newRole);
+      setEmployees(prev => prev.map(u => u.email === email ? { ...u, role: newRole } : u));
+      toast.success("Role updated successfully");
+    } catch (e) {
+      toast.error("Failed to update role: " + e.message);
+    }
+  };
+
+  const updateManager = async (employeeEmail, leaderEmail) => {
+    try {
+      await assignEmployeeToLeader(employeeEmail, leaderEmail);
+      setEmployees(prev => prev.map(u => u.email === employeeEmail ? { ...u, managed_by: leaderEmail } : u));
+      toast.success("Manager assigned successfully");
+    } catch (e) {
+      toast.error("Failed to assign manager: " + e.message);
+    }
+  };
+
+
+
+  const downloadExcel = () => {
+    const headers = ["Name", "Email", "Phone", "Date", "Time", "Type", "Address", "Platform", "Checked By", "Shared Device"];
+    // Create maps for quick lookup (case-insensitive keys)
+    const emailMap = {};
+    const phoneMap = {};
+    employees.forEach(emp => {
+      if (emp.name) {
+        if (emp.email) emailMap[emp.name.toLowerCase()] = emp.email;
+        if (emp.phone) phoneMap[emp.name.toLowerCase()] = emp.phone;
+      }
+    });
+
+    const rows = allRecords.map(r => {
+      const { hours, minutes, seconds } = getBangkokTimeParts(r.time);
+      const timeStr = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+
+      // Try reading audit info from top-level or from 'device' JSON
+      const checkedBy = r.checked_in_by || r.device?.checkedInBy || "";
+      const isShared = r.shared_device || r.device?.sharedDevice ? "Yes" : "No";
+
+      // Look up info from the maps (case-insensitive)
+      const userEmail = emailMap[r.userName?.toLowerCase()] || "";
+      const userPhone = phoneMap[r.userName?.toLowerCase()] || "";
+
+      return [
+        r.userName,
+        userEmail,
+        userPhone,
+        getBangkokYMD(parseISO(r.time)),
+        timeStr,
+        r.type,
+        r.address || "",
+        r.device?.platform || "",
+        checkedBy,
+        isShared
+      ];
+    });
+
+    const aoa = [
+      headers,
+      ...rows
+    ];
+    
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    XLSX.utils.book_append_sheet(wb, ws, "Attendance");
+    XLSX.writeFile(wb, `attendance_export_${getBangkokYMD(new Date())}.xlsx`);
+  };
+
+  const navItems = [
+    { id: "overview", label: t('adminDashboard') || "Overview", icon: "📊" },
+    { id: "calendar", label: t('attendanceCalendar') || "Calendar", icon: "📅" },
+    { id: "payroll", label: t('payroll') || "Payroll", icon: "💰" }
+  ];
+
+  return (
+    <div className="dashboard-layout">
+      <Sidebar 
+        title="Admin Panel"
+        items={navItems} 
+        activeItem={activeTab} 
+        onChange={setActiveTab} 
+      />
+      <main className="dashboard-content">
+        {activeTab === "overview" && (
+          <section className="single" style={{ animation: "fadeIn 0.3s ease" }}>
+            <Card
+              title={t('adminDashboard')}
+              subtitle={t('adminSubtitle')}
+              right={
+                <div className="row">
+                  <span className="pill"><span className="dot" style={{ background: "var(--ok)" }} /> {workingCount} {t('working')}</span>
+                  <span className="pill"><span className="dot" style={{ background: "#cbd5e1" }} /> {employees.length} {t('total')}</span>
+                  <button
+                    onClick={() => setShowSettings(!showSettings)}
+                    className="btn-icon"
+                    style={{ marginLeft: 12, background: showSettings ? "var(--bg)" : "white" }}
+                  >
+                    ⚙️ {t('settings')}
+                  </button>
+                  <button onClick={downloadExcel} className="btn-icon" style={{ marginLeft: 8, background: "var(--primary)", color: "white" }}>Export Excel</button>
+                  <button onClick={onLogout} className="btn-icon" style={{ marginLeft: 8 }}>{t('logout')}</button>
+                </div>
+              }
+            >
+              {showSettings && (
+                <div className="item" style={{ marginBottom: 20, borderTop: "2px solid var(--primary)" }}>
+                  <h3 className="title">{t('settings')}</h3>
+
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: "block", marginBottom: 6, fontWeight: 700 }}>{t('selectEmployeeLabel')}</label>
+                    <select
+                      className="input"
+                      value={settingsTarget}
+                      onChange={(e) => setSettingsTarget(e.target.value)}
+                      style={{ width: "100%", padding: "8px", borderRadius: "8px", border: "1px solid #ddd" }}
+                    >
+                      <option value="default">{t('defaultSettings')}</option>
+                      {employees.map(emp => (
+                        <option key={emp.id} value={emp.name}>{emp.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid2" style={{ gap: 20 }}>
+                    <div>
+                      <label>{t('workStartTime')}</label>
+                      <input
+                        type="time"
+                        value={tempStart}
+                        onChange={e => setTempStart(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label>{t('workEndTime')}</label>
+                      <input
+                        type="time"
+                        value={tempEnd}
+                        onChange={e => setTempEnd(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div className="row mt12">
+                    <button className="btn btnPrimary" onClick={saveWorkSettings}>{t('saveSettings')}</button>
+                  </div>
+                </div>
+              )}
+
+              <div className="adminGrid">
+                <div>
+                  <h3 className="title" style={{ fontSize: 15, margin: "0 0 10px 0" }}>{t('employees')}</h3>
+
+                  <div className="list">
+                    {loading ? (
+                      <div className="muted small">{t('loadingEmployees')}</div>
+                    ) : employees.length === 0 ? (
+                      <div className="muted small">{t('noEmployees')}</div>
+                    ) : employees.map((u) => {
+                      const st = getLatestStatus(u);
+                      const latestTime = st.latest ? formatBangkokTime(st.latest.time) : "—";
+                      const dotColor = st.status === t('statusWorking') ? "var(--ok)" : "#cbd5e1";
+
+                      return (
+                        <div
+                          key={u.id}
+                          className={"item " + (selectedId === u.id ? "selected" : "")}
+                          onClick={() => toggleSelect(u.id)}
+                        >
+                          <div className="row" style={{ justifyContent: "space-between" }}>
+                            <div>
+                              <div style={{ fontWeight: 900 }}>
+                                {u.name} <span className="muted2" style={{ fontWeight: 700 }}>({u.email})</span>
+                              </div>
+                              <div className="muted small">{t('last')}: {latestTime}</div>
+                              <div style={{ display: "flex", gap: "4px", marginTop: "4px" }}>
+                                <span className="pill" style={{ background: u.role === 'team_leader' ? "#dcfce7" : "#f1f5f9", color: u.role === 'team_leader' ? "#166534" : "#475569", fontSize: "10px", padding: "2px 6px" }}>
+                                  {u.role === 'team_leader' ? 'Team Leader' : 'Employee'}
+                                </span>
+                                {calculateTodayStats(u.name).isLateLogin && (
+                                  <span className="pill" style={{ background: "#fee2e2", color: "#991b1b", fontSize: "10px", padding: "2px 6px" }}>{t('lateLogin')}</span>
+                                )}
+                                {calculateTodayStats(u.name).isEarlyLogout && (
+                                  <span className="pill" style={{ background: "#fef3c7", color: "#92400e", fontSize: "10px", padding: "2px 6px" }}>{t('earlyLogout')}</span>
+                                )}
+                              </div>
+                            </div>
+                            <span className="pill">
+                              <span className="dot" style={{ background: dotColor }} />
+                              <span>{st.status}</span>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <h3 className="title" style={{ fontSize: 15, margin: "0 0 10px 0" }}>{t('details')}</h3>
+
+                  {!selected ? (
+                    <div className="muted small">{t('selectEmployee')}</div>
+                  ) : (
+                    <>
+                      {(() => {
+                        const st = getLatestStatus(selected);
+                        const latest = st.latest;
+                        const stats = calculateTodayStats(selected.name);
+
+                        return (
+                          <div className="item" style={{ cursor: "default", borderLeft: stats.isActive ? "4px solid var(--ok)" : "none" }}>
+                            <div style={{ fontWeight: 950, fontSize: 16 }}>{selected.name}</div>
+                            <div className="muted small">
+                              {selected.email}{selected.phone ? " • " + selected.phone : ""}
+                            </div>
+
+                            {!selected.isVirtual && (
+                              <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 10 }}>
+                                <div style={{ flex: 1, minWidth: 150 }}>
+                                  <label className="muted small" style={{ fontWeight: 700 }}>Role</label>
+                                  <select
+                                    className="input"
+                                    value={selected.role}
+                                    onChange={(e) => updateRole(selected.email, e.target.value)}
+                                    style={{ width: "100%", padding: "4px 8px", fontSize: "13px" }}
+                                  >
+                                    <option value="employee">Employee</option>
+                                    <option value="team_leader">Team Leader</option>
+                                    <option value="admin">Admin</option>
+                                  </select>
+                                </div>
+                                {selected.role === "employee" && (
+                                  <div style={{ flex: 1, minWidth: 150 }}>
+                                    <label className="muted small" style={{ fontWeight: 700 }}>Manager (Team Leader)</label>
+                                    <select
+                                      className="input"
+                                      value={selected.managed_by || ""}
+                                      onChange={(e) => updateManager(selected.email, e.target.value)}
+                                      style={{ width: "100%", padding: "4px 8px", fontSize: "13px" }}
+                                    >
+                                      <option value="">No Manager</option>
+                                      {employees
+                                        .filter(u => u.role === "team_leader")
+                                        .map(tl => (
+                                          <option key={tl.id} value={tl.email}>{tl.name}</option>
+                                        ))
+                                      }
+                                    </select>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            <div className="hr" />
+
+                            <div className="row" style={{ justifyContent: "space-between", marginBottom: 16 }}>
+                              <div>
+                                <div className="muted small" style={{ fontWeight: 700, marginBottom: 4 }}>{t('todayWorkingHours')}</div>
+                                <div style={{ fontSize: "1.2rem", fontWeight: 900, color: stats.isActive ? "var(--ok)" : "var(--text)" }}>
+                                  {stats.totalTime}
+                                </div>
+                                {stats.isActive && <div className="muted2 small">{t('activeSession')}</div>}
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "8px" }}>
+                                  {stats.isLateLogin && (
+                                    <div className="column" style={{ gap: 4 }}>
+                                      <div className="pill" style={{ background: "#fee2e2", color: "#991b1b", fontWeight: "bold" }}>
+                                        {t('lateLoginWarning').replace('{time}', stats.limitStart)}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {stats.isEarlyLogout && (
+                                    <div className="column" style={{ gap: 4 }}>
+                                      <div className="pill" style={{ background: "#fef3c7", color: "#92400e", fontWeight: "bold" }}>
+                                        {t('earlyLogoutWarning').replace('{time}', stats.limitEnd)}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                              <div style={{ textAlign: "right" }}>
+                                <span className="pill" style={{ marginBottom: 4, display: "inline-flex" }}>
+                                  <span className="dot" style={{ background: st.status === t('statusWorking') ? "var(--ok)" : "#cbd5e1" }} />
+                                  <span>{st.status}</span>
+                                </span>
+                                <div className="muted small">{t('last')}: {latest ? formatBangkokTime(latest.time) : "—"}</div>
+                              </div>
+                            </div>
+
+                            {latest ? (
+                              <>
+                                <div className="hr" />
+                                <div className="muted small"><b>{t('latest')} {latest.type === "checkin" ? t('checkin') : t('checkout')}</b></div>
+                                <LocationMap
+                                  lat={latest.lat}
+                                  lng={latest.lng}
+                                  address={latest.address}
+                                  height="200px"
+                                />
+                                <div className="muted small" style={{ marginTop: 8 }}>{latest.address || t('addressUnavailable')}</div>
+                                <div className="muted2 small" style={{ marginTop: 6 }}>
+                                  <b>{t('device')}:</b> {latest.device?.platform || ""}
+                                </div>
+                              </>
+                            ) : (
+                              <div className="muted small">{t('noLogs')}</div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      <div className="hr" />
+
+                      <div className="list">
+                        {selectedLogs.slice(0, 25).map((r) => (
+                          <div key={r.id} className="item" style={{ cursor: "default" }}>
+                            <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+                              <div>
+                                <div style={{ fontWeight: 900 }}>
+                                  {r.type === "checkin" ? t('checkin') : t('checkout')}{" "}
+                                  <span className="muted2" style={{ fontWeight: 700 }}>• {formatBangkokTime(r.time)}</span>
+                                </div>
+                                <div className="muted mono">lat:{Number(r.lat).toFixed(6)} lng:{Number(r.lng).toFixed(6)}</div>
+                                <div className="muted small">{r.address || t('addressUnavailable')}</div>
+                              </div>
+                              <div className="muted2 small" style={{ textAlign: "right" }}>
+                                <div className="mono">{r.device?.platform || ""}</div>
+                                {(r.checked_in_by || r.device?.checkedInBy) && (
+                                  <div style={{ color: "var(--primary)", fontWeight: 700, marginTop: 4 }}>
+                                    via {r.checked_in_by || r.device?.checkedInBy}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </Card>
+          </section>
+        )}
+
+        {activeTab === "calendar" && (
+          <section className="single" style={{ animation: "fadeIn 0.3s ease" }}>
+            <AttendanceCalendar employees={employees} allRecords={allRecords} />
+          </section>
+        )}
+
+        {activeTab === "payroll" && (
+          <section className="single" style={{ animation: "fadeIn 0.3s ease" }}>
+            <PayrollPanel
+              employees={employees}
+              allRecords={allRecords}
+              workSettings={workSettings}
+            />
+          </section>
+        )}
+      </main>
+
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(5px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+    </div>
+  );
+}
